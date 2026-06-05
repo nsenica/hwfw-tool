@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''
 Copyright (C) 2016 Xiaolan.Lee<LeeXiaolan@gmail.com>
 License: GPLv2 (see LICENSE for details).
@@ -11,7 +11,6 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 '''
 
-from __future__ import print_function
 import logging
 import os
 import socket
@@ -68,7 +67,7 @@ class HuaweiFirmware(object):
     initialOffset = offset
     itemDataBegin = initialOffset + self.header.itemCount * HuaweiFirmwareItem._FORMAT.size
     self.items = []
-    for i in xrange(self.header.itemCount):
+    for i in range(self.header.itemCount):
       item, size = self._parseSingleItemInfo(data[offset:])
       offset += size
       if not noItemData:
@@ -131,21 +130,34 @@ class HuaweiFirmware(object):
       strs.append(item.toString())
       data.append(item.data)
       self.header.fileLength += item.size
-    # Convert to big endian.
-    self.header.fileLength = socket.htonl(self.header.fileLength)
+    # Convert to big endian and ensure it's in the signed int32 range
+    file_length_be = socket.htonl(self.header.fileLength & 0xFFFFFFFF)
+    # Convert back to signed if needed
+    if file_length_be > 0x7FFFFFFF:
+      self.header.fileLength = file_length_be - 0x100000000
+    else:
+      self.header.fileLength = file_length_be
 
     # Update header CRC32 value.
-    self.header.headerCrc = seqCrc32(strs)
+    self.header.headerCrc = seqCrc32(strs) & 0xFFFFFFFF
+    # Convert to signed int32
+    if self.header.headerCrc > 0x7FFFFFFF:
+      self.header.headerCrc -= 0x100000000
 
     if not noItemData:
       strs.extend(data)
       # All data are present, now update file CRC32 value.
       strs[0] = self.header.toString()[12:]
-      self.header.fileCrc = seqCrc32(strs)
+      crc_value = seqCrc32(strs) & 0xFFFFFFFF
+      # Convert to signed int32
+      if crc_value > 0x7FFFFFFF:
+        self.header.fileCrc = crc_value - 0x100000000
+      else:
+        self.header.fileCrc = crc_value
 
     # Using the latest header with correct CRC32 value and file length.
     strs[0] = self.header.toString()
-    return ''.join(strs)
+    return b''.join(strs)
 
   def getDotDirectory(self, directory):
     return os.path.join(directory, '.fw')
@@ -170,17 +182,22 @@ class HuaweiFirmwareHeader(object):
     return size
 
   def toString(self):
+    # Ensure unsigned values are in valid range (0 to 4294967295)
+    fileLength = self.fileLength if self.fileLength >= 0 else self.fileLength + 0x100000000
+    headerSize = self.headerSize if self.headerSize >= 0 else self.headerSize + 0x100000000
+    itemCount = self.itemCount if self.itemCount >= 0 else self.itemCount + 0x100000000
+    
     return self._FORMAT.pack(
       self.magic,
-      self.fileLength,
+      fileLength & 0xFFFFFFFF,
       self.fileCrc,
-      self.headerSize,
+      headerSize & 0xFFFFFFFF,
       self.headerCrc,
-      self.itemCount,
+      itemCount & 0xFFFFFFFF,
       0,
       self.extraHeaderLength,
       self.itemSize,
-      '\0' * 6,
+      b'\0' * 6,
     )
 
 class HuaweiFirmwareItem(object):
@@ -206,15 +223,22 @@ class HuaweiFirmwareItem(object):
     return self.start + self.size
 
   def toString(self):
+    # Ensure unsigned values are in valid range
+    seq = self.seq if self.seq >= 0 else self.seq + 0x100000000
+    start = self.start if self.start >= 0 else self.start + 0x100000000
+    size = self.size if self.size >= 0 else self.size + 0x100000000
+    policy = self.policy if self.policy >= 0 else self.policy + 0x100000000
+    unknown = self.unknown if self.unknown >= 0 else self.unknown + 0x100000000
+    
     return self._FORMAT.pack(
-      self.seq,
+      seq & 0xFFFFFFFF,
       self.crc,
-      self.start,
-      self.size,
+      start & 0xFFFFFFFF,
+      size & 0xFFFFFFFF,
       self.name,
       self.typeName,
-      self.policy,
-      self.unknown,
+      policy & 0xFFFFFFFF,
+      unknown & 0xFFFFFFFF,
     )
 
   def saveData(self, directory):
@@ -244,15 +268,22 @@ class HuaweiFirmwareItem(object):
 
   def update(self):
     self.size = len(self.data)
-    self.crc = crc32(self.data)
+    crc_value = crc32(self.data) & 0xFFFFFFFF
+    # Convert to signed int32
+    if crc_value > 0x7FFFFFFF:
+      self.crc = crc_value - 0x100000000
+    else:
+      self.crc = crc_value
 
   @property
   def path(self):
-    if self.name.startswith('file:'):
-      return self.name[5:].rstrip('\0')
-    elif self.name.startswith('flash:'):
-      return os.path.join('flash', self.name[6:].rstrip('\0'))
-    raise NotImplementedError(self.name.rstrip('\0'))
+    # Decode bytes to string for Python 3
+    name_str = self.name.decode('utf-8', errors='ignore') if isinstance(self.name, bytes) else self.name
+    if name_str.startswith('file:'):
+      return name_str[5:].rstrip('\0')
+    elif name_str.startswith('flash:'):
+      return os.path.join('flash', name_str[6:].rstrip('\0'))
+    raise NotImplementedError(name_str.rstrip('\0'))
 
 def unpack(opt):
   fw = HuaweiFirmware()
